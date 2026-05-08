@@ -85,13 +85,12 @@ services:
     ports:
       - "8080:80"
 
-  # web: enabled once the relisten-web fork is cloned in ./relisten-web
-  # web:
-  #   build:
-  #     context: ./relisten-web
-  #   restart: unless-stopped
-  #   depends_on: [api]
-  #   environment:
-  #     API_URL: http://api:3823
-  #   ports:
-  #     - "3000:3000"
+  web:
+    build:
+      context: ./relisten-web
+    restart: unless-stopped
+    depends_on: [api]
+    environment:
+      RELISTEN_API_URL: http://api:3823
+    ports:
+      - "3000:3000"
