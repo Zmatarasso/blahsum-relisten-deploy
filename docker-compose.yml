@@ -63,7 +63,11 @@ services:
       ASPNETCORE_ENVIRONMENT: Production
       REDIS_URL: redis://redis:6379
       DATABASE_URL: postgresql://relisten:local_dev_password@db:5432/relisten_db
-      PGBOUNCER_DATABASE_URL: postgresql://relisten:local_dev_password@pgbouncer:5432/relisten_db
+      # PGBOUNCER_DATABASE_URL intentionally unset:
+      # transaction-mode pgbouncer breaks Npgsql's prepared-statement cache
+      # (08P01 'prepared statement did not exist'). At home-server scale we
+      # don't need a pooler. To re-enable, bump pgbouncer to >=1.21 with
+      # max_prepared_statements > 0 (transaction-mode prepared statements).
       PORT: "3823"
       PANIC_KEY: changeme-local
       RELISTEN_ADMIN__USERNAME: admin
