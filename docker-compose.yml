@@ -93,4 +93,4 @@ services:
     environment:
       RELISTEN_API_URL: http://api:3823
     ports:
-      - "3000:3000"
+      - "${WEB_PORT:-3000}:3000"
