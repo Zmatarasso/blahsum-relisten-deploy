@@ -138,6 +138,25 @@ Required by AGPL-3.0 (we're hosting modified Relisten source publicly).
 - **Monitoring.** `docker compose ps` cron + a healthcheck endpoint on the API. Light: a Healthchecks.io ping is enough at home-server scale.
 - **Logging.** Compose default. Promote to Loki only if we get noisy.
 
+### Phase 6.5 — Virtual track splits (metadata-only, no schema change)
+
+Today every BLAHSUM mp3 is one continuous show = one source = one track.
+We want multiple "tracks" out of a single file (songs within a set,
+sets within a show) without splitting the audio or changing the DB
+schema.
+
+Design: encode start/end seconds in the `mp3_url` query string
+(`?t=180,720`). The player parses, seeks, watches `timeupdate` to
+advance. The audio server ignores the param. A swapped-in upstream
+Relisten DB plays whole files (no `?t=`) unchanged — degradation is
+graceful both directions.
+
+Full design + player implementation sketch + cuesheet importer
+convention in [`docs/track-splits.md`](docs/track-splits.md). About
+one day of work split between the web fork and the importer. Not
+blocking anything; pick up when whole-show tracks become annoying or
+when we want per-song shareable links.
+
 ### Phase 7 — Promote to paid / cloud hosting
 Trigger: home upload becomes the bottleneck OR uptime expectations grow.
 
