@@ -66,6 +66,40 @@ def ensure_slug_unique_index(cur: psycopg.Cursor) -> None:
     )
 
 
+def rebuild_show_source_information(cur: psycopg.Cursor) -> int:
+    """Rebuild show_source_information from sources.
+
+    Several controllers (ShowService, ArtistService) INNER JOIN this
+    table — no rows here means the API returns 404 for shows that
+    actually exist. Upstream maintains this table from the importers
+    (ImporterBase.cs). We rebuild from scratch each run; cheap at our
+    scale and avoids drift.
+    """
+    cur.execute("TRUNCATE show_source_information;")
+    cur.execute(
+        """
+        INSERT INTO show_source_information (
+            show_id, max_updated_at, source_count, artist_id,
+            max_avg_rating_weighted, has_soundboard_source, has_flac,
+            max_created_at
+        )
+        SELECT
+            src.show_id,
+            MAX(src.updated_at)            AS max_updated_at,
+            COUNT(*)                       AS source_count,
+            src.artist_id,
+            MAX(src.avg_rating_weighted)   AS max_avg_rating_weighted,
+            BOOL_OR(src.is_soundboard)     AS has_soundboard_source,
+            BOOL_OR(src.flac_type IN (1, 2)) AS has_flac,
+            MAX(src.created_at)            AS max_created_at
+        FROM sources src
+        WHERE src.show_id IS NOT NULL
+        GROUP BY src.show_id, src.artist_id;
+        """
+    )
+    return cur.rowcount
+
+
 def upsert_year(cur: psycopg.Cursor, artist_id: int, year: str) -> int:
     cur.execute(
         """

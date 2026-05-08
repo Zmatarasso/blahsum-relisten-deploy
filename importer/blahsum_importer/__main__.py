@@ -22,7 +22,12 @@ import sys
 from pathlib import Path
 from urllib.parse import quote
 
-from .db import connect, ensure_slug_unique_index, import_track
+from .db import (
+    connect,
+    ensure_slug_unique_index,
+    import_track,
+    rebuild_show_source_information,
+)
 from .parser import parse_filename
 from .probe import probe
 
@@ -101,6 +106,11 @@ def cmd_import(args: argparse.Namespace) -> int:
                 f"track_id={ids['track_id']} duration={info.duration_seconds}s"
             )
             inserted += 1
+
+        with conn.cursor() as cur:
+            ssi_rows = rebuild_show_source_information(cur)
+        conn.commit()
+        print(f"  + show_source_information rebuilt: {ssi_rows} rows")
 
     print(f"Done. inserted/updated={inserted}  skipped={skipped}")
     return 0
