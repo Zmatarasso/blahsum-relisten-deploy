@@ -16,7 +16,7 @@ cd "$(dirname "$0")"
 API_REPO="https://github.com/Zmatarasso/blahsum-relisten-api.git"
 API_BRANCH="blahsum/empty-db-bootstrap"   # has the empty-DB patch
 WEB_REPO="https://github.com/Zmatarasso/blahsum-relisten.git"
-WEB_BRANCH="master"
+WEB_BRANCH="blahsum/dockerfile-zfs-fix"   # has the pnpm-throttle Dockerfile patch
 
 clone_or_update () {
   local dir="$1" repo="$2" branch="$3"
