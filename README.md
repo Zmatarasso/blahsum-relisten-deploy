@@ -1,77 +1,153 @@
 # blahsum-relisten
 
-A self-hosted fork of [Relisten](https://relisten.net) for streaming a custom catalog of live recordings. The audio files are hosted locally (eventually on archive.org); the database, API, and web UI are derived from the upstream Relisten codebase under AGPL-3.0.
+A self-hosted fork of [Relisten](https://relisten.net) for streaming a
+custom catalog of live recordings. Audio files are served from local
+storage (eventually object storage / archive.org); the database, API,
+and web UI are derived from the upstream Relisten codebase under
+AGPL-3.0.
+
+Currently: **blahsum.live** — every Blahsum show, ever.
 
 ## Repos
 
-| Path             | Source                                  | Status |
-| ---------------- | --------------------------------------- | ------ |
-| `RelistenApi/`   | https://github.com/RelistenNet/RelistenApi (clone for now, fork later) | cloned |
-| `relisten-web/`  | https://github.com/RelistenNet/relisten-web (will be forked as Zmatarasso/blahsum-relisten) | pending |
+| Repo | Purpose | Branch |
+| --- | --- | --- |
+| [`Zmatarasso/blahsum-relisten-deploy`](https://github.com/Zmatarasso/blahsum-relisten-deploy) | This repo. docker-compose, importer, nginx, plan. | `main` |
+| [`Zmatarasso/blahsum-relisten-api`](https://github.com/Zmatarasso/blahsum-relisten-api) | Backend (.NET) — fork of RelistenNet/RelistenApi | `blahsum/empty-db-bootstrap` |
+| [`Zmatarasso/blahsum-relisten`](https://github.com/Zmatarasso/blahsum-relisten) | Frontend (Next.js) — fork of RelistenNet/relisten-web | `blahsum/dockerfile-zfs-fix` |
+
+`bootstrap.sh` clones both forks at the right branches.
 
 ## Stack
 
-- **Postgres + TimescaleDB** — concert/track metadata
-- **Redis** — caching used by the API
-- **pgbouncer** — connection pooling
-- **RelistenApi** (.NET 10) — REST API on port 3823
-- **relisten-web** (Next.js) — frontend on port 3000
-- **nginx** — serves audio files from `./audio/` on port 8080
-- **adminer** — DB GUI on port 18080
+| Service | Image / source | Port | Notes |
+| --- | --- | --- | --- |
+| `db` | `timescale/timescaledb:2.19.3-pg17` | 15432 | Postgres + TimescaleDB |
+| `redis` | `redis:7.4` | (internal) | API cache |
+| `pgbouncer` | `edoburu/pgbouncer:v1.24.0-p1` | (internal) | Currently bypassed; see compose |
+| `api` | `./RelistenApi/Dockerfile` | 3823 | .NET 10, REST + Hangfire |
+| `web` | `./relisten-web/Dockerfile` | `${WEB_PORT:-3000}` | Next.js 16 RSC |
+| `audio` | `nginx:alpine` | 8080 | Static byte-range audio |
+| `adminer` | `adminer` | 18080 | DB GUI for metadata edits |
+| `importer` | `./importer/Dockerfile` | (run on demand) | `--profile tools` only |
 
-## First-time setup
+## Bringing it up on a fresh host
 
-### 1. Empty-DB workaround
-
-Upstream `Startup.cs` calls `migrator.Baseline(2)` on an empty DB, which assumes the official Relisten DB seed (artists/sources tables pre-populated). For our empty DB we need to change that to `Baseline(0)` so all migrations run from scratch. This patch goes in our fork of `RelistenApi`:
-
-```csharp
-// RelistenApi/Startup.cs ~line 180
-if (migrator.CurrentMigration == null || migrator.CurrentMigration.Version == 0)
-{
-    migrator.Baseline(0);   // was: Baseline(2)
-}
-migrator.MigrateTo(10);
+```sh
+git clone https://github.com/Zmatarasso/blahsum-relisten-deploy.git
+cd blahsum-relisten-deploy
+./bootstrap.sh                   # clones the API + web forks
+cp .env.example .env             # edit paths if needed
+docker compose up -d
+docker compose --profile tools run --rm importer import
 ```
 
-### 2. Bring it up
+That's it. Visit `http://<host>:${WEB_PORT:-3000}/`.
+
+For TrueNAS specifics see [`PLAN.md`](PLAN.md). Empty DBs are explicitly
+supported; you don't need the upstream Relisten DB seed.
+
+## Editing metadata
+
+The catalog is just rows in Postgres. Edit them however you like.
+
+### Adminer (web GUI) — quickest
+
+`http://<host>:18080`
+
+| Field | Value |
+| --- | --- |
+| System | PostgreSQL |
+| Server | `db` |
+| Username | `relisten` |
+| Password | `local_dev_password` |
+| Database | `relisten_db` |
+
+Click `Select data` on a table, double-click a cell to edit, **Save**.
+Changes are live immediately — refresh the web app to see them.
+
+### Tables you'll typically want to edit
+
+| Want to change | Table | Field(s) |
+| --- | --- | --- |
+| Show date | `shows` | `date` (date) **and** `display_date` (text, `YYYY-MM-DD`). They have to match — `display_date` is the public unique key. |
+| Track title | `source_tracks` | `title`, `slug` (slug must be lowercase-with-dashes) |
+| Track number / order | `source_tracks` | `track_position` (1-based) |
+| Set name | `source_sets` | `name`, `index`, `is_encore` |
+| Artist display name | `artists` | `name` (visible), `slug` (URL — changing breaks bookmarks), `sort_name` (alphabetic order) |
+| Year nav label | `years` | `year` (text) |
+| What audio URL the player hits | `source_tracks` | `mp3_url` or `flac_url` |
+| Hide a show without deleting | drop the source's `show_id` to NULL — show row stays but un-listed |
+
+After bigger edits, re-run the importer's aggregation pass to refresh
+the join table the API uses for show counts:
+
+```sh
+docker compose --profile tools run --rm importer import
+```
+
+(The importer is idempotent — it re-upserts existing files and
+rebuilds `show_source_information` at the end.)
+
+### What NOT to edit
+
+- `uuid` columns — these are referenced by clients; if you change one
+  you'll break in-flight bookmarks and the mobile app's caches. Treat
+  them as immutable.
+- `id` columns — primary keys. Don't.
+- `versioninfo` — that's the migration history. Touching it will
+  confuse the migrator.
+
+### Renaming audio files: the gotcha
+
+The importer keys sources by `(artist_id, upstream_identifier)`, where
+`upstream_identifier` is the file's relative path under `AUDIO_DIR`.
+**If you rename a file, the importer treats the new path as a new
+source.** The old row stays around as orphaned metadata.
+
+Two ways to handle this:
+
+1. **Edit metadata in Adminer instead of renaming the file.** Change
+   `source_tracks.title`, `shows.display_date`, etc. — leave the file
+   alone. Recommended.
+2. **Rename, then clean up.** After rename + reimport, delete the
+   orphaned source from `sources` (cascades to its set + track via FK
+   ON DELETE).
+
+Eventually the importer will detect renames by content hash; not built
+yet.
+
+## Adding new audio
+
+1. Drop the file into the host path that's bind-mounted as
+   `${AUDIO_DIR}` (e.g. `/mnt/BlahNas/Blahsum/shared/radioTracksStorage/`
+   on the production NAS).
+2. `docker compose --profile tools run --rm importer import`
+3. Refresh the web app.
+
+Filename heuristics today (subject to drift; see
+[`importer/blahsum_importer/parser.py`](importer/blahsum_importer/parser.py)):
 
 ```
-docker compose up -d db redis pgbouncer adminer
-docker compose up -d --build api
+"BLAHSUM live in <City>[, <ST>] <date> <venue>.mp3"
+   → live show, parses date out
+"BLAHSUM - <Title>.mp3"
+   → studio track, date = file mtime
 ```
 
-Wait for the API to finish migrations (watch `docker compose logs -f api`). The web service is commented out until we fork it.
+## Project plan
 
-### 3. Audio layout
-
-Drop files into `./audio/` using this convention:
-
-```
-audio/
-  <artist-slug>/
-    YYYY-MM-DD <venue>/
-      01 - Track Name.flac
-      02 - Track Name.flac
-      ...
-```
-
-The custom importer (TODO) walks this tree and populates `artists`, `shows`, `sources`, and `sources_tracks` rows with `mp3_url`/`flac_url` pointing at `http://<host>:8080/audio/<path>`.
-
-## Roadmap
-
-- [x] Clone RelistenApi
-- [ ] Fork RelistenApi → patch `Baseline(2)` → `Baseline(0)`
-- [ ] Fork relisten-web → rebrand
-- [ ] Verify migrations run cleanly on empty DB
-- [ ] Custom audio importer (CLI tool that walks `./audio/` and inserts rows)
-- [ ] Reverse proxy + TLS (Caddy) for public exposure
-- [ ] Deploy to TrueNAS Community Edition (native Docker apps)
-
-## Hosting target
-
-TrueNAS Community Edition 25.04 (rebranded SCALE). Deploy via the Apps system using a Custom App backed by this `docker-compose.yml`, or `docker compose` directly inside an SSH session.
+[`PLAN.md`](PLAN.md) is the implementation plan and decision log. Read
+that for context on phases, why TrueNAS Community Edition was chosen,
+the path to paid hosting, etc.
 
 ## License
 
-This project derives from Relisten (AGPL-3.0). All modifications under the same license. Source published at https://github.com/Zmatarasso/blahsum-relisten (fork TBD).
+AGPL-3.0, inherited from upstream Relisten. All forks are public:
+- https://github.com/Zmatarasso/blahsum-relisten-deploy
+- https://github.com/Zmatarasso/blahsum-relisten-api
+- https://github.com/Zmatarasso/blahsum-relisten
+
+Upstream:
+- https://github.com/RelistenNet/RelistenApi
+- https://github.com/RelistenNet/relisten-web
