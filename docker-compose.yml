@@ -94,3 +94,17 @@ services:
       RELISTEN_API_URL: http://api:3823
     ports:
       - "${WEB_PORT:-3000}:3000"
+
+  importer:
+    # Run on demand:  docker compose run --rm importer dry-run --probe
+    #                 docker compose run --rm importer import
+    profiles: ["tools"]
+    build:
+      context: ./importer
+    depends_on: [db]
+    environment:
+      DATABASE_URL: postgresql://relisten:local_dev_password@db:5432/relisten_db
+      AUDIO_DIR: /audio
+      AUDIO_PUBLIC_URL_BASE: ${AUDIO_PUBLIC_URL_BASE:-http://localhost:8080/audio}
+    volumes:
+      - ${AUDIO_DIR:-./audio}:/audio:ro
