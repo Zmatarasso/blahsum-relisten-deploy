@@ -100,6 +100,29 @@ def rebuild_show_source_information(cur: psycopg.Cursor) -> int:
     return cur.rowcount
 
 
+def ensure_features(cur: psycopg.Cursor, artist_id: int) -> None:
+    """Every artist needs a `features` row.
+
+    ShowService.cs accesses `artist.features.tours` etc. without
+    null-checking; without a row we get NREs on every show query.
+    Default everything to false except `track_durations` (so the player
+    shows lengths) and `years` (so the year nav works). We can flip
+    flags later as we add features.
+    """
+    cur.execute("SELECT 1 FROM features WHERE artist_id = %s LIMIT 1;", (artist_id,))
+    if cur.fetchone() is not None:
+        return
+    cur.execute(
+        """
+        INSERT INTO features (
+            artist_id, years, track_durations, sets, multiple_sources
+        )
+        VALUES (%s, true, true, true, true);
+        """,
+        (artist_id,),
+    )
+
+
 def upsert_year(cur: psycopg.Cursor, artist_id: int, year: str) -> int:
     cur.execute(
         """
@@ -279,6 +302,7 @@ def import_track(
 ) -> dict:
     """Run the full upsert chain for a single file. Returns row IDs for logs."""
     artist_id = upsert_artist(cur, parsed.artist_name, parsed.artist_slug)
+    ensure_features(cur, artist_id)
     year_id = upsert_year(cur, artist_id, str(parsed.show_date.year))
     show_id = upsert_show(
         cur, artist_id, year_id, parsed.show_date, parsed.display_date
