@@ -1,0 +1,7 @@
+data/
+audio/
+RelistenApi/
+relisten-web/
+*.local.yml
+.env
+.env.*

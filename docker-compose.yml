@@ -1,0 +1,94 @@
+version: "3.9"
+
+# blahsum-relisten — local stack
+#
+# Layout:
+#   ./RelistenApi   — backend (cloned, will be forked)
+#   ./relisten-web  — frontend (will be forked + cloned)
+#   ./audio         — your music files, served by nginx as /audio/...
+#   ./data/postgres — Postgres data (TimescaleDB)
+#   ./data/redis    — Redis data
+#
+# Bring up: docker compose up -d
+# Adminer: http://localhost:18080  (server: db, user: relisten, pw: local_dev_password)
+# API:     http://localhost:3823/api-docs
+# Web:     http://localhost:3000
+# Audio:   http://localhost:8080/audio/<path>
+
+services:
+  redis:
+    image: redis:7.4
+    restart: unless-stopped
+    volumes:
+      - ./data/redis:/data
+
+  db:
+    image: timescale/timescaledb:2.19.3-pg17
+    restart: unless-stopped
+    command: ["postgres", "-c", "max_locks_per_transaction=5000"]
+    environment:
+      POSTGRES_PASSWORD: local_dev_password
+      POSTGRES_USER: relisten
+      POSTGRES_DB: relisten_db
+      PGDATA: /pgdata
+    volumes:
+      - ./data/postgres:/pgdata
+    shm_size: 1g
+    ports:
+      - "15432:5432"  # exposed for adhoc psql; remove for prod
+
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.24.0-p1
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://relisten:local_dev_password@db:5432/relisten_db
+      POOL_MODE: transaction
+      AUTH_TYPE: scram-sha-256
+    depends_on:
+      - db
+
+  adminer:
+    image: adminer
+    restart: unless-stopped
+    depends_on: [db]
+    environment:
+      ADMINER_DEFAULT_SERVER: db
+    ports:
+      - "18080:8080"
+
+  api:
+    build:
+      context: ./RelistenApi
+    restart: unless-stopped
+    depends_on: [db, pgbouncer, redis]
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      REDIS_URL: redis://redis:6379
+      DATABASE_URL: postgresql://relisten:local_dev_password@db:5432/relisten_db
+      PGBOUNCER_DATABASE_URL: postgresql://relisten:local_dev_password@pgbouncer:5432/relisten_db
+      PORT: "3823"
+      PANIC_KEY: changeme-local
+      RELISTEN_ADMIN__USERNAME: admin
+      RELISTEN_ADMIN__PASSWORD: changeme-local
+    ports:
+      - "3823:3823"
+
+  audio:
+    image: nginx:alpine
+    restart: unless-stopped
+    volumes:
+      - ./audio:/usr/share/nginx/html/audio:ro
+      - ./nginx-audio.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "8080:80"
+
+  # web: enabled once the relisten-web fork is cloned in ./relisten-web
+  # web:
+  #   build:
+  #     context: ./relisten-web
+  #   restart: unless-stopped
+  #   depends_on: [api]
+  #   environment:
+  #     API_URL: http://api:3823
+  #   ports:
+  #     - "3000:3000"
