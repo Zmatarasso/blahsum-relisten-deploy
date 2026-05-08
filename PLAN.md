@@ -6,6 +6,14 @@ Living document. Update as we go.
 
 Self-host a Relisten-derived live-music streaming site with our own catalog, hosted from a home TrueNAS server first, then promoted to paid hosting once we want public traffic. Audio files served from local storage initially, migrated onto archive.org later.
 
+## Domain layout
+
+- `blahsum.com` — existing personal site, **GitHub Pages, untouched**.
+- `relisten.blahsum.com` — this project. CNAME / A record points at the current host (NAS first, cloud later). One DNS record swap is the entire migration story for this domain.
+- `api.relisten.blahsum.com` (optional) — if we want the API on its own subdomain. Default plan: keep it behind the same Caddy as the web app at `relisten.blahsum.com/api/*`. Decision deferrable.
+
+**Why subdomain instead of `/relisten` path:** relisten-web is a Next.js RSC app (server-rendered, not static-exportable), so it cannot live as a directory on GH Pages. Routing it via Cloudflare to a path under `blahsum.com` would require a Next.js `basePath` patch against the fork, prefixing internal links, and fighting upstream on every rebase. Subdomain sidesteps all of that — zero code changes against upstream relisten-web for routing.
+
 ## Portability as a hard constraint
 
 The TrueNAS box is the **first** target, not the **only** one. Every Phase 1–6 decision must keep the stack movable to a different host (Hetzner, Fly.io, Railway, a friend's server, a different NAS) with at most a config change. Concretely:
@@ -85,7 +93,7 @@ The API has importers for archive.org/Phish.in/etc. None of them ingest local fi
   ```
   /mnt/<pool>/audio/<artist-slug>/YYYY-MM-DD <venue>/NN - Track Name.flac
   ```
-- **Where it lives:** new tool in `RelistenApi/tools/` (a small `dotnet run` console app that reuses the existing `DbService` / model classes), OR a standalone Python script that talks to Postgres directly. Decision pending; the .NET path lets us reuse the model layer and not duplicate UUID/slug logic.
+- **Where it lives:** standalone Python tool in this deploy repo at `importer/`, packaged as its own Docker image and a Compose service (`docker compose run --rm importer`). Connects to Postgres via `psycopg`, reads audio metadata via `mutagen`, runs `ffprobe` for accurate durations. We duplicate UUID/slug logic from the upstream API rather than depend on the .NET code — simpler to maintain on Linux/cloud, simpler to rebase, simpler for anyone else.
 - **What it does, per scan:**
   1. Walk the audio root.
   2. Upsert `artists` (one row per top-level dir).
@@ -114,13 +122,13 @@ Required by AGPL-3.0 (we're hosting modified Relisten source publicly).
 **Exit criteria:** the site shows blahsum branding, references `Zmatarasso/blahsum-relisten` as source.
 
 ### Phase 5 — TLS + public exposure
-1. Domain (decision pending — `blahsum.com`? subdomain of an existing one?).
-2. DNS to home IP (or Cloudflare Tunnel, no port forwarding needed).
-3. Add a `caddy` service to compose with this routing:
-   - `domain/` → `web:3000`
-   - `domain/api/*` → `api:3823`
-   - `domain/audio/*` → `audio:80`
-4. Let's Encrypt automatic via Caddy. Cloudflare proxy off (audio = streaming = bandwidth = Cloudflare ToS friction; safer to direct).
+1. DNS: add a record for `relisten.blahsum.com` pointing at the current host. Use a Cloudflare Tunnel (no port forwarding) or a direct A record to the home IP. `blahsum.com` itself stays on GH Pages, untouched.
+2. Add a `caddy` service to compose with this routing for `relisten.blahsum.com`:
+   - `/` → `web:3000`
+   - `/api/*` → `api:3823`
+   - `/audio/*` → `audio:80`
+3. Let's Encrypt automatic via Caddy. Cloudflare proxy off (audio = streaming = bandwidth = Cloudflare ToS friction; safer to direct).
+4. CORS / cookie scope: everything is same-origin under `relisten.blahsum.com`, so no cross-origin CORS config beyond the audio container's existing `Access-Control-Allow-Origin: *`.
 
 **Exit criteria:** `https://<domain>/` works from the public internet with a valid cert.
 
@@ -185,8 +193,9 @@ Numbers move once we know real audio size and listener traffic, but this gives t
 
 ## Open decisions
 
-- [ ] Importer language — .NET (reuses models) vs Python (faster to write, dupes some logic). Leaning .NET.
-- [ ] Domain name.
+- [x] Importer language — **Python** (Linux/cloud-friendly, easier rebase story; we duplicate the small bit of slug/UUID logic from the .NET API rather than depend on it).
+- [x] Domain — **`relisten.blahsum.com`** as a subdomain. `blahsum.com` itself stays on GH Pages.
+- [ ] API on its own subdomain (`api.relisten.blahsum.com`) vs path (`relisten.blahsum.com/api`). Defaulting to path for simplicity; revisit if we want to publish the API as a standalone product.
 - [ ] Whether to merge `blahsum/empty-db-bootstrap` into `master` on the API fork or keep it as a topic branch the deploy script pins to. Currently pinned via `bootstrap.sh`.
 - [ ] Which TrueNAS pool / dataset names to use.
 - [ ] When to write a Custom App YAML so this is visible in the TrueNAS Apps UI vs continuing to run `docker compose` directly via SSH.
