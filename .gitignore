@@ -5,3 +5,4 @@ relisten-web/
 *.local.yml
 .env
 .env.*
+!.env.example
