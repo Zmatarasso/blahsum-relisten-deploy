@@ -14,9 +14,9 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 API_REPO="https://github.com/Zmatarasso/blahsum-relisten-api.git"
-API_BRANCH="blahsum/empty-db-bootstrap"   # has the empty-DB patch
+API_BRANCH="main"   # blahsum.live (live)
 WEB_REPO="https://github.com/Zmatarasso/blahsum-relisten.git"
-WEB_BRANCH="blahsum/dockerfile-zfs-fix"   # has the pnpm-throttle Dockerfile patch
+WEB_BRANCH="main"   # blahsum.live (live)
 
 clone_or_update () {
   local dir="$1" repo="$2" branch="$3"

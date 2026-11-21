@@ -55,13 +55,13 @@ Remove relisten's route only with `tailscale funnel --https=10000 off`.
 
 ## 3. Making code changes and deploying
 
-1. Work on a branch in the relevant repo (currently all three use
-   `blahsum/security-hardening-2026-11`). Don't push to GitHub unless Zach asks.
+1. Work on a feature branch in the relevant repo and open a PR to `main`
+   (`main` is what is live in all three repos; see README.md).
 2. Check deps before deploying:
    - web: `pnpm install && pnpm audit --prod && pnpm run build`
    - api: `dotnet list RelistenApi/RelistenApi.csproj package --vulnerable --include-transitive && dotnet build -c Release`
-3. Get the commits onto the NAS checkout (git bundle via scp works without
-   GitHub), then on the NAS:
+3. After merging, pull `main` on the NAS checkout (`git pull --ff-only` in the
+   repo(s) that changed), then:
    ```sh
    cd /mnt/SolidStateApps/relisten/blahsum-relisten-deploy
    sudo -n docker compose build --pull web api      # only what changed
