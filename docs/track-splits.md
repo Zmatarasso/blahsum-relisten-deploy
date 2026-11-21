@@ -1,6 +1,6 @@
 # Design: virtual track splits
 
-**Status:** proposed
+**Status:** not built. Superseded (Nov 2026) by `.tracks.txt` sidecars that cut per-song files; see docs/EDITING.md §6.
 **Author:** zmatarasso
 **Constraint:** must work with the upstream Relisten schema unchanged
 (so any Relisten DB can be swapped into this stack and Just Work).

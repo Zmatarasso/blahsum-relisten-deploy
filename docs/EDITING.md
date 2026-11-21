@@ -20,6 +20,8 @@ public containers can reach.**
 | Postgres data | `/mnt/SolidStateApps/relisten/data/postgres` |
 | DB dumps / config backups | `/mnt/SolidStateApps/relisten/backups/` (mode 700) |
 | Secrets | `db.env`, `api.env` in the deploy dir (mode 600, gitignored). **Never print, cat, or commit them.** Use `./gen-secrets.sh` / `./rotate-db-password.sh`. |
+| Cut song files | `/mnt/SolidStateApps/relisten/tracks/` (owned by uid 65534; written only by importer-watch) |
+| Import status | `/mnt/SolidStateApps/relisten/importer-status/import-status.txt` (public at `/import-status.txt`) |
 | Funnel socket dir | `/mnt/SolidStateApps/tailscale/relisten-edge/` (owned by uid 101; holds only `edge.sock`) |
 
 SSH: `truenas_admin@192.168.1.166` (key auth). Docker needs `sudo -n`.
@@ -29,14 +31,19 @@ The NAS login shell is zsh; pipe scripts through `bash -s`.
 
 ```
 Internet ─Funnel :10000─> unix:edge.sock ─> edge (nginx, uid 101) ──app net──> web (Next.js) ──api net──> api (.NET) ──data net──> db, redis
-                                              └─ /audio/  (read-only bind of AUDIO_DIR only)
+                                              ├─ /audio/   (read-only bind of AUDIO_DIR only)
+                                              ├─ /tracks/  (read-only: songs cut by importer-watch)
+                                              └─ /import-status.txt
+importer-watch ──data net──> db, redis   (audio read-only; writes only tracks/ and importer-status/)
 ```
 
 - Every Docker network is `internal: true` + `inhibit_ipv4` + no IPv6. Containers
   can reach each other only; **no internet, no LAN, no NAS host (UI/SMB/SSH)**.
   Verified with probes. Don't add `ports:`, don't add a non-internal network to
   `edge`/`web`/`api`/`db`/`redis`, don't mount any other host path.
-- `edge` only serves `/audio/*` (static, byte ranges) and proxies **GET/HEAD**
+- `edge` and the importers read the audio share through the NAS `builtin_users`
+  group (gid 545, via its ACL entry), not root. `edge` serves only `/audio/*`,
+  `/tracks/*`, `/import-status.txt` (static) and proxies **GET/HEAD**
   to `web`. Everything else → 405. The API (Swagger, Hangfire dashboard,
   admin/import endpoints) is **not routed publicly at all**; only `web` talks
   to it server-side.
@@ -44,7 +51,9 @@ Internet ─Funnel :10000─> unix:edge.sock ─> edge (nginx, uid 101) ──ap
   (except `db`), memory limits. Hangfire background server is off.
 - Play scrobbling to api.relisten.net and OpenTelemetry export to upstream's
   collector are disabled in the web fork (privacy + no egress).
-- Adminer and the importer are `--profile tools` only (not running normally).
+- `importer-watch` runs all the time on the internal `data` network only, as
+  uid 65534 with a read-only root filesystem. Adminer and the one-off
+  `importer` are `--profile tools` only.
   Adminer binds `127.0.0.1:18080` only.
 
 Funnel config (inside `ix-tailscale-tailscale-1`): port 443 = File Browser,
@@ -79,52 +88,73 @@ change TrueNAS settings.
 
 ## 3a. Where to put shows (adding new recordings)
 
-**Folder (one flat folder, all shows go here):**
+**Folder:** `\\truenas\Blahsum\shared\radioTracksStorage`
+(NAS: `/mnt/BlahNas/Blahsum/shared/radioTracksStorage`). Anyone in the NAS
+`builtin_users` group (zach, gabe, nate, rube) can write there over SMB.
+Subfolders are fine. Folders starting with `_` or `.` are ignored.
 
-| From | Path |
-| --- | --- |
-| Windows / SMB | `\\truenas\Blahsum\shared\radioTracksStorage` |
-| NAS shell | `/mnt/BlahNas/Blahsum/shared/radioTracksStorage` |
+**It's automatic.** The `importer-watch` container checks the folder every
+5 minutes. When a show file or `.tracks.txt` file is added, changed or
+removed, it re-imports. New or changed shows appear on the site about
+5–10 minutes later. Check the result at
+**https://truenas-scale.tail5a1866.ts.net:10000/import-status.txt**. It shows
+the last check time, the shows it found, and any problems, such as a
+`.tracks.txt` line it didn't understand.
 
-That is `AUDIO_DIR`; the site serves it read-only at `/audio/…`. Nothing
-else on the NAS is visible to the site. Subfolders work too (the path
-becomes part of the URL), but folders whose name starts with `_` or `.`
-are **ignored** by the importer (reserved for split song files, see §6).
-
-**File name = metadata.** One file = one show recording. Name live shows:
+**File name = default info.** One file = one show recording:
 
 ```
 BLAHSUM live in <City>[ <ST>] <M-D-YY> <Venue or notes>.mp3
 e.g.  BLAHSUM live in Brooklyn NY 4-26-25 The Gutter.mp3
 ```
 
-- Date: `M-D-YY`, `MM-DD-YY` or `M-D-YYYY`, dashes only (not slashes/dots).
-  2-digit years <70 → 20YY. The first valid date in the name wins.
-- Text after the date becomes the track title and venue (`The Gutter`).
-- Must contain the word `live` to count as a live show.
-- Studio songs: `BLAHSUM - <Title>.mp3` (no date → the file's modified date is used).
-- Formats: `.mp3` (best, what browsers stream), `.m4a`, `.ogg`, `.flac`, `.wav`
-  are picked up, but the player uses `mp3_url`, so prefer MP3.
-- Two files with the same date (e.g. `… 12-13-24 Frost St Gallery set 1.mp3`
-  and `… set 2.mp3`) become **one show with two alternate recordings
-  (sources)**, not two sets. To present them as Set 1 / Set 2 of one
-  recording, fix it in SQL (§5) or merge the audio before importing.
-- Avoid renaming a file after import: the importer keys on the path, so a
-  rename creates a second copy of the show (see README "gotcha").
+- Date: `M-D-YY`, `MM-DD-YY` or `M-D-YYYY` with dashes (2-digit years under
+  70 → 20YY). Text after the date becomes the title. The name must contain
+  `live`. For studio songs, use `BLAHSUM - <Title>.mp3` (the date comes from
+  the file's modified time).
+- Formats: prefer `.mp3`. `.m4a`, `.ogg`, `.flac` and `.wav` are picked up
+  too, but browsers stream mp3 best.
+- Two files with the same date become one show with two alternate
+  recordings.
+- **Removing a file removes the show** from the site at the next import.
+  There's a safety stop if more than half the files seem to vanish at once.
+  Renaming a file is the same as removing it and adding a new one.
 
-**Trigger the import** (on the NAS, safe to re-run any time):
+A `.tracks.txt` file next to the show (§6) can override the date, title and
+venue, and add song markers. Prefer that over renaming files.
 
-```sh
-cd /mnt/SolidStateApps/relisten/blahsum-relisten-deploy
-sudo -n docker compose --profile tools run --rm importer dry-run   # preview, no DB writes
-sudo -n docker compose --profile tools run --rm importer import    # do it
-```
+Manual run (optional, on the NAS):
+`sudo -n docker compose --profile tools run --rm importer import`.
 
-**Then:** the show appears at
-`https://truenas-scale.tail5a1866.ts.net:10000/blahsum/YYYY/MM/DD` (and on the
-artist/year pages) within ~5 minutes (web/API caches). To see it at once:
-`sudo -n docker compose restart redis api web`. Afterwards add song markers
-(§6) or fix titles/dates (§5).
+## 3b. For Gabe (quick version)
+
+1. Copy the show into `\\truenas\Blahsum\shared\radioTracksStorage`, named like
+   `BLAHSUM live in Brooklyn NY 4-26-25 The Gutter.mp3`.
+2. Optional: next to it, make a text file with the **same name** but ending in
+   `.tracks.txt` instead of `.mp3`
+   (`BLAHSUM live in Brooklyn NY 4-26-25 The Gutter.tracks.txt`):
+   ```
+   date: 2025-04-26
+   title: The Gutter
+   venue: The Gutter, Brooklyn NY
+
+   0:00     Intro
+   3:00     Crystal Eel
+   12:05    Sundown
+   1:58:30  Last Song *
+   ```
+   - Each song line is a start time (minutes:seconds, or hours:minutes:seconds)
+     then the song name. Times count from the start of the recording and
+     must go up.
+   - Put `*` at the end of a song name to put it in the Encore.
+   - All lines are optional. Leave out the song lines to keep one long track.
+     Lines starting with `#` are ignored, and so is anything after a `#`, so
+     don't use `#` in song names.
+3. Wait about 10 minutes, then check
+   https://truenas-scale.tail5a1866.ts.net:10000/import-status.txt. Your show
+   should be listed (e.g. `[4 songs]`), with problems shown underneath.
+4. To fix something, edit the `.tracks.txt` file and save. The site updates
+   on the next check. To go back to one long track, delete the `.tracks.txt`.
 
 ## 4. Database model (upstream Relisten schema, unchanged)
 
@@ -175,79 +205,51 @@ COMMIT;
 UPDATE source_tracks SET title='Frost St Gallery (Set 1)', slug='frost-st-gallery-set-1', updated_at=now() WHERE id=…;
 UPDATE sources SET description='…', taper_notes='…' WHERE id=…;
 ```
-⚠ For a whole-file (not split) show, re-running the importer resets the track
-title to the one parsed from the filename. Either rename the file (see README
-gotcha) or split the show into tracks (below), which the importer then leaves
-alone.
+⚠ The importer re-applies file-name / `.tracks.txt` values on every run, so
+SQL edits to dates and titles of imported shows get overwritten. **Use a
+`.tracks.txt` sidecar for dates, titles, venues and songs** (§3b and §6).
+Use SQL only for things the sidecar doesn't cover, like `taper_notes`.
 
-**Add new audio:** drop the mp3 into `AUDIO_DIR` named like
-`BLAHSUM live in <City>[, <ST>] <M-D-YY> <Venue>.mp3`, then
-`sudo -n docker compose --profile tools run --rm importer import`.
+**Add new audio:** see §3a. Drop it in the folder and it imports automatically.
 
 ## 6. Track markers (songs inside a long show recording)
 
-**What actually exists (checked Nov 21 2026: every branch/stash in the NAS,
-PC and GitHub copies of all three repos):**
+**Use the `.tracks.txt` sidecar** (format in §3b). On each import,
+`importer-watch`:
 
-| Feature | Status |
-| --- | --- |
-| **Timestamp links** `?t=` on a page URL, e.g. `/blahsum/2025/04/26/the-gutter?t=12m30s` (also `?t=750`, `1h2m3s`) | ✅ Works and deployed (inherited from upstream Relisten: `src/lib/timeParam.ts`, `PlayerManager.tsx`). Opens the show and jumps to that time. Good for "song X starts here" links, but it is not a song list. |
-| **Real per-song tracks** = several `source_tracks` rows per show | ✅ Works today with the stock player **if each song is its own audio file** (option A below). |
-| **Virtual splits** (`mp3_url=...mp3?t=180,720`, one file, many tracks) + `.cue` / `.splits.json` importer | ❌ Design only: `docs/track-splits.md` / PLAN.md Phase 6.5 ("about one day of work… pick up later"). No player or importer code exists on any branch. Rows with `?t=` URLs would just play the whole file. |
+1. Reads `<show file>.tracks.txt`, which must have the same name as the audio
+   file but end in `.tracks.txt`.
+2. Applies the `date:`, `title:` and `venue:` overrides. They stick on every
+   re-import. A date change moves the recording to the new date, and the
+   empty old show is removed.
+3. If there are song lines, it cuts one file per song with
+   `ffmpeg -c copy` (no re-encoding, so quality is unchanged) into
+   `/mnt/SolidStateApps/relisten/tracks/<show-key>/NN-<song>.mp3`. That
+   folder belongs to relisten and is served read-only at `/tracks/…`. The
+   original mp3 is only ever read.
+4. Replaces the show's tracks with one row per song: `Set 1` holds the songs,
+   an `Encore` set holds the songs marked `*`, and durations come from the
+   cut files. Track UUIDs are kept by position.
+5. Re-cuts only when the audio file or the song list changes. A signature
+   file in each cut folder tracks this. Removing the sidecar, or all its song
+   lines, deletes the cut files and restores the single full-length track.
 
-### Option A (works today): cut song files + add track rows
+Every problem is listed in `/import-status.txt` and the import keeps going.
+Examples: an unreadable line, times that don't go up, or a last song that
+starts after the recording ends. In the case of a bad song list, the show
+keeps one long track.
 
-1. Write down song start times. Cut without re-encoding into a `_tracks`
-   subfolder (ignored by the importer). There's no ffmpeg on the NAS host, so
-   use the importer image (it has ffmpeg) with no network:
-   ```sh
-   cd /mnt/SolidStateApps/relisten/blahsum-relisten-deploy
-   A=/mnt/BlahNas/Blahsum/shared/radioTracksStorage
-   mkdir -p "$A/_tracks/2025-04-26"
-   sudo -n docker run --rm --network none --user "$(id -u):0" -v "$A:/a" --entrypoint ffmpeg \
-     blahsum-relisten-deploy-importer -n -i "/a/BLAHSUM live in Brooklyn NY 4-26-25 The Gutter.mp3" \
-     -ss 0 -to 180 -c copy "/a/_tracks/2025-04-26/01-intro.mp3"
-   # repeat per song (-ss start -to end, seconds or HH:MM:SS; omit -to on the last)
-   ```
-   This writes new files into Zach's audio share (originals untouched); ask first.
-2. Swap the show's single whole-file track for per-song rows (same source/set):
-   ```sql
-   BEGIN;
-   SELECT so.id AS source_id, ss.id AS set_id FROM sources so
-     JOIN source_sets ss ON ss.source_id = so.id WHERE so.display_date = '2025-04-26';
-   DELETE FROM source_tracks WHERE source_id = <source_id>;      -- the whole-file row
-   INSERT INTO source_tracks (artist_id, source_id, source_set_id, track_position, title, slug, mp3_url, duration, uuid, updated_at) VALUES
-    ((SELECT id FROM artists WHERE slug='blahsum'), <source_id>, <set_id>, 1, 'Intro', 'intro',
-     'https://truenas-scale.tail5a1866.ts.net:10000/audio/_tracks/2025-04-26/01-intro.mp3', 180, gen_random_uuid(), now()),
-    ((SELECT id FROM artists WHERE slug='blahsum'), <source_id>, <set_id>, 2, 'Crystal Eel', 'crystal-eel',
-     'https://truenas-scale.tail5a1866.ts.net:10000/audio/_tracks/2025-04-26/02-crystal-eel.mp3', 540, gen_random_uuid(), now());
-   COMMIT;
-   ```
-   URL-encode spaces (`%20`) in `mp3_url`; `duration` = seconds; `slug` =
-   lowercase-with-dashes, unique within the show. Encore: add a
-   `source_sets` row (`index`=1, `name`='Encore', `is_encore`=true) and point
-   those tracks at it.
-3. Re-running the importer leaves hand-split shows alone (it skips track
-   rows for any source that has non-whole-file tracks).
+**Timestamp links** (`/blahsum/2025/04/26/the-gutter?t=12m30s`) also still
+work. They come from upstream Relisten and jump the player to a time.
 
-**Fix markers later:** re-cut the one song file with new times (overwrite
-with `-y` instead of `-n`), then update that row's `duration`; rename with
-`UPDATE source_tracks SET title=…, slug=… WHERE id=…`; reorder with
-`track_position`. To undo a split: delete the per-song rows and re-run the
-importer; it recreates the whole-file track.
+**Hand-made tracks in SQL** (advanced): sources whose tracks point somewhere
+other than the whole file or `/tracks/`, e.g. files under `_tracks/` that
+you wired up yourself, are left alone by the importer as long as there's no
+sidecar with song lines. If a sidecar has song lines, it wins.
 
-### Option B (quick, no file changes): timestamp links
-Keep the whole-file track and share/list links like
-`…/blahsum/2025/04/26/the-gutter?t=3m0s`. You can put a song list with start times in
-`sources.taper_notes` — the show page's tapes column displays taper notes
-as text (links may not be clickable).
-
-### Missing (if Zach wants one-file markers)
-Implement `docs/track-splits.md`: player support for `?t=start,end` in
-`relisten-web/src/lib/player.tsx` (seek, stop/advance at end, gapless within
-one file, scrubber/duration math) + importer reading `<file>.cue` /
-`<file>.splits.json` sidecars. Then markers become a text file next to the mp3.
-Also missing: admin UI, upload page.
+**Not built:** song markers *inside* one file with the player seeking
+(`?t=start,end`, see `docs/track-splits.md`). Cut files made that
+unnecessary.
 
 ## 7. Adminer (GUI), on demand only
 

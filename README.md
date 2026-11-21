@@ -32,7 +32,8 @@ to RelistenNet.
 | --- | --- |
 | Host | TrueNAS SCALE, `truenas_admin@192.168.1.166` (SSH key; Docker commands need `sudo -n`) |
 | Checkout | `/mnt/SolidStateApps/relisten/blahsum-relisten-deploy` (forks nested inside, as above) |
-| Compose project | `blahsum-relisten-deploy`: services `edge`, `web`, `api`, `db`, `redis` (plus `importer` and `adminer` under `--profile tools`) |
+| Compose project | `blahsum-relisten-deploy`: services `edge`, `web`, `api`, `db`, `redis`, `importer-watch` (auto-import), plus `importer` and `adminer` under `--profile tools` |
+| Cut songs and import status | `/mnt/SolidStateApps/relisten/tracks/` (served at `/tracks/`), `/mnt/SolidStateApps/relisten/importer-status/` (served at `/import-status.txt`) |
 | Public route | Tailscale Funnel port **10000** → unix socket `/mnt/SolidStateApps/tailscale/relisten-edge/edge.sock` |
 | Audio (read-only) | `/mnt/BlahNas/Blahsum/shared/radioTracksStorage` = `\\truenas\Blahsum\shared\radioTracksStorage` |
 | Database | Postgres 17 + TimescaleDB, data in `/mnt/SolidStateApps/relisten/data/postgres`; dumps in `/mnt/SolidStateApps/relisten/backups/` |
@@ -74,8 +75,12 @@ TrueNAS settings. Never touch Funnel ports 443 or 8443.
 - Every Docker network is `internal` with `inhibit_ipv4` and no IPv6, so
   containers can't reach the internet, the LAN or the NAS host (UI, SMB, SSH).
   Don't add `ports:`, non-internal networks or extra host mounts.
-- `edge` serves only `/audio/` (read-only bind of the one audio folder) and
-  proxies only GET and HEAD requests to `web`. The API, Swagger, Hangfire,
+- `edge` serves only `/audio/` (read-only bind of the one audio folder),
+  `/tracks/` (read-only cut songs) and `/import-status.txt`, and proxies only
+  GET and HEAD requests to `web`. Audio is read through the NAS
+  `builtin_users` group (gid 545), not root.
+- `importer-watch` is on the internal data network only, mounts audio
+  read-only, and can write only `tracks/` and `importer-status/`. The API, Swagger, Hangfire,
   Postgres and Redis are never routed publicly.
 - Containers run unprivileged (`cap_drop: ALL`, `no-new-privileges`, read-only
   root filesystems, memory limits).
@@ -86,16 +91,26 @@ TrueNAS settings. Never touch Funnel ports 443 or 8443.
 ## Where shows go
 
 Drop recordings into `\\truenas\Blahsum\shared\radioTracksStorage`, named like
-`BLAHSUM live in Brooklyn NY 4-26-25 The Gutter.mp3`, then run:
+`BLAHSUM live in Brooklyn NY 4-26-25 The Gutter.mp3`. **Import is automatic:**
+`importer-watch` picks up new, changed or removed files within 5 minutes, and
+the site shows them about 5 minutes after that. Results and problems are at
+https://truenas-scale.tail5a1866.ts.net:10000/import-status.txt.
 
-```sh
-sudo -n docker compose --profile tools run --rm importer import
+To set the date, title or venue, or to split a show into songs, put a
+`<same name>.tracks.txt` next to the mp3:
+
+```
+date: 2025-04-26
+venue: The Gutter, Brooklyn NY
+0:00  Intro
+3:00  Crystal Eel
+1:58:30  Last Song *      # * = encore
 ```
 
-The show appears at `/blahsum/YYYY/MM/DD` within about 5 minutes.
-[`docs/EDITING.md`](docs/EDITING.md) has the full naming rules, how to fix dates
-and titles, the database model, track markers and how to split long shows into
-songs.
+The importer cuts per-song files (no re-encoding; the original is never
+touched) and keeps them in sync when you edit the file.
+[`docs/EDITING.md`](docs/EDITING.md) has a "For Gabe" quick guide (§3b), the
+full rules, the database model and more.
 
 ## For outside contributors: layout, colors, branding
 
