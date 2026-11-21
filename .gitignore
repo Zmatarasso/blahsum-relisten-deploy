@@ -6,3 +6,6 @@ relisten-web/
 .env
 .env.*
 !.env.example
+db.env
+api.env
+backups/

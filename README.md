@@ -18,53 +18,54 @@ Currently: **blahsum.live** — every Blahsum show, ever.
 
 `bootstrap.sh` clones both forks at the right branches.
 
-## Stack
+## Stack (hardened Nov 2026)
 
-| Service | Image / source | Port | Notes |
+Public URL: **https://truenas-scale.tail5a1866.ts.net:10000/** (Tailscale Funnel).
+
+| Service | Image / source | Networks | Notes |
 | --- | --- | --- | --- |
-| `db` | `timescale/timescaledb:2.19.3-pg17` | 15432 | Postgres + TimescaleDB |
-| `redis` | `redis:7.4` | (internal) | API cache |
-| `pgbouncer` | `edoburu/pgbouncer:v1.24.0-p1` | (internal) | Currently bypassed; see compose |
-| `api` | `./RelistenApi/Dockerfile` | 3823 | .NET 10, REST + Hangfire |
-| `web` | `./relisten-web/Dockerfile` | `${WEB_PORT:-3000}` | Next.js 16 RSC |
-| `audio` | `nginx:alpine` | 8080 | Static byte-range audio |
-| `adminer` | `adminer` | 18080 | DB GUI for metadata edits |
-| `importer` | `./importer/Dockerfile` | (run on demand) | `--profile tools` only |
+| `edge` | `nginxinc/nginx-unprivileged:1.31.7-alpine` | app | Only public entry. Listens on a unix socket Funnel proxies to. Serves `/audio/` (read-only bind of `AUDIO_DIR`) and proxies GET/HEAD to `web`. |
+| `web` | `./relisten-web` (Next.js 16.4) | app, api | Server-side renders from the API. |
+| `api` | `./RelistenApi` (.NET 10) | api, data | Never routed publicly (no Swagger/Hangfire/admin exposure). |
+| `db` | `timescale/timescaledb:2.32.1-pg17` | data | No host port. |
+| `redis` | `redis:7.4.12-alpine` | data | Cache only, no persistence. |
+| `importer` | `./importer` | data | `--profile tools`, run on demand. |
+| `adminer` | `adminer:5.5.1` | data, admin | `--profile tools`, loopback-only port 18080. |
 
-## Bringing it up on a fresh host
+All networks are Docker `internal` with `inhibit_ipv4` and no IPv6: containers
+can talk to each other but cannot reach the internet, the LAN, or the NAS host
+itself (UI/SMB/SSH). No container publishes a LAN port. All run with
+`cap_drop: ALL`, `no-new-privileges`, read-only root filesystems (except db).
+PgBouncer was removed (it was bypassed anyway).
+
+## Bringing it up
 
 ```sh
-git clone https://github.com/Zmatarasso/blahsum-relisten-deploy.git
-cd blahsum-relisten-deploy
-./bootstrap.sh                   # clones the API + web forks
-cp .env.example .env             # edit paths if needed
-docker compose up -d
+./bootstrap.sh                 # clones the API + web forks
+cp .env.example .env           # host paths
+./gen-secrets.sh               # creates db.env / api.env (random, mode 600)
+mkdir -p "$EDGE_SOCKET_DIR" && chown 101:0 "$EDGE_SOCKET_DIR" && chmod 700 "$EDGE_SOCKET_DIR"
+docker compose up -d --build
+./rotate-db-password.sh        # only for an existing DB created with an old password
 docker compose --profile tools run --rm importer import
+# public route (in the tailscale container):
+tailscale funnel --bg --https=10000 unix:/var/lib/tailscale/relisten-edge/edge.sock
 ```
-
-That's it. Visit `http://<host>:${WEB_PORT:-3000}/`.
-
-For TrueNAS specifics see [`PLAN.md`](PLAN.md). Empty DBs are explicitly
-supported; you don't need the upstream Relisten DB seed.
 
 ## Editing metadata
 
-The catalog is just rows in Postgres. Edit them however you like.
+The catalog is just rows in Postgres.
 
-### Adminer (web GUI) — quickest
+### Adminer (on demand, loopback only)
 
-`http://<host>:18080`
+```sh
+docker compose --profile tools up -d adminer       # on the NAS
+ssh -L 18080:127.0.0.1:18080 truenas_admin@truenas  # from your PC
+```
 
-| Field | Value |
-| --- | --- |
-| System | PostgreSQL |
-| Server | `db` |
-| Username | `relisten` |
-| Password | `local_dev_password` |
-| Database | `relisten_db` |
-
-Click `Select data` on a table, double-click a cell to edit, **Save**.
-Changes are live immediately — refresh the web app to see them.
+Open `http://localhost:18080`: System PostgreSQL, Server `db`, user
+`relisten`, database `relisten_db`, password = `POSTGRES_PASSWORD` in `db.env`.
+Stop it when done: `docker compose stop adminer`.
 
 ### Tables you'll typically want to edit
 
