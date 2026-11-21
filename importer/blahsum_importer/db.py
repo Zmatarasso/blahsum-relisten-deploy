@@ -316,6 +316,15 @@ def import_track(
         duration_seconds=info.duration_seconds,
     )
     set_id = upsert_default_set(cur, source_id)
+    # If this source has been hand-curated into per-song tracks (any track
+    # whose mp3_url is not the whole file), leave its tracks alone.
+    cur.execute(
+        "SELECT 1 FROM source_tracks WHERE source_id = %s AND mp3_url <> %s LIMIT 1;",
+        (source_id, public_url),
+    )
+    if cur.fetchone() is not None:
+        return dict(artist_id=artist_id, year_id=year_id, show_id=show_id,
+                    source_id=source_id, source_set_id=set_id, track_id=None)
     track_id = upsert_track(
         cur,
         artist_id=artist_id,

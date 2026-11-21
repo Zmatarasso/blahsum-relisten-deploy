@@ -37,6 +37,12 @@ _AUDIO_EXTS = {".mp3", ".flac", ".m4a", ".ogg", ".wav"}
 
 def _walk_audio(root: Path):
     for p in sorted(root.rglob("*")):
+        # Skip anything under a folder starting with "_" (e.g. _tracks/):
+        # those hold hand-split per-song files that are wired up via SQL,
+        # not imported as shows. Also skip dotfiles.
+        rel = p.relative_to(root).parts
+        if any(part.startswith(("_", ".")) for part in rel):
+            continue
         if p.is_file() and p.suffix.lower() in _AUDIO_EXTS:
             yield p
 
