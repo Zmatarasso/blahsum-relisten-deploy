@@ -7,7 +7,9 @@
 # reach the internet, the LAN, or the TrueNAS host (UI/SMB/SSH) at all.
 #
 #   Funnel ──unix socket──> edge ──app net──> web ──api net──> api ──data net──> db, redis
-#                            └── /audio (read-only bind of ONE folder)
+#                            ├── /audio  (read-only bind of ONE folder)
+#                            └── /tracks (read-only: songs cut by importer-watch)
+#   importer-watch ──data net──> db, redis  (audio read-only; writes tracks/ + status/)
 #
 # Secrets live in ./db.env and ./api.env (chmod 600, gitignored, generated
 # by ./gen-secrets.sh). See README.
@@ -97,34 +99,70 @@ services:
   edge:
     <<: *hardening
     image: nginxinc/nginx-unprivileged:1.31.7-alpine
-    # uid 101 (nginx); gid 0 is needed only because the audio files are
-    # zach:root 0770. Only the one audio folder is mounted, read-only.
-    user: "101:0"
+    # uid/gid 101 (nginx). Reads the audio share through the NAS
+    # `builtin_users` group (gid 545), whose ACL entry grants access to
+    # radioTracksStorage. Every mount is read-only except the socket dir.
+    user: "101:101"
+    group_add: ["545"]
     depends_on: [web]
     read_only: true
-    tmpfs: ["/tmp", "/var/cache/nginx:uid=101,gid=0"]
+    tmpfs: ["/tmp", "/var/cache/nginx:uid=101,gid=101"]
     volumes:
       - ${AUDIO_DIR:?set AUDIO_DIR}:/srv/audio:ro
+      - ${TRACKS_DIR_HOST:?set TRACKS_DIR_HOST}:/srv/tracks:ro
+      - ${STATUS_DIR_HOST:?set STATUS_DIR_HOST}:/srv/status:ro
       - ./edge/nginx.conf:/etc/nginx/nginx.conf:ro
       - ${EDGE_SOCKET_DIR:?set EDGE_SOCKET_DIR}:/run/edge
     networks: [app]
     mem_limit: 256m
 
+  importer-watch:
+    # Auto-import: re-imports within ~5 min whenever a file or a
+    # .tracks.txt sidecar in AUDIO_DIR changes. Audio is read-only; it can
+    # write only the cut-songs folder and the status folder. data network
+    # only (no internet/LAN/host).
+    <<: *hardening
+    image: blahsum-relisten-importer:hardened
+    build: { context: ./importer }
+    command: ["watch", "--interval", "300"]
+    user: "65534:65534"
+    group_add: ["545"]
+    depends_on: [db, redis]
+    env_file: [api.env]
+    environment: &importer_env
+      AUDIO_DIR: /audio
+      AUDIO_PUBLIC_URL_BASE: ${AUDIO_PUBLIC_URL_BASE:?set AUDIO_PUBLIC_URL_BASE}
+      TRACKS_DIR: /tracks
+      TRACKS_PUBLIC_URL_BASE: ${TRACKS_PUBLIC_URL_BASE:?set TRACKS_PUBLIC_URL_BASE}
+      STATUS_DIR: /status
+      REDIS_URL: redis://redis:6379
+    read_only: true
+    tmpfs: ["/tmp"]
+    volumes: &importer_vols
+      - ${AUDIO_DIR}:/audio:ro
+      - ${TRACKS_DIR_HOST}:/tracks
+      - ${STATUS_DIR_HOST}:/status
+    networks: [data]
+    mem_limit: 512m
+
   # ---- on-demand tools (never part of `docker compose up -d`) ----
 
   importer:
+    # One-off manual run (importer-watch normally does this automatically):
+    #   docker compose --profile tools run --rm importer import
     profiles: ["tools"]
+    image: blahsum-relisten-importer:hardened
     build: { context: ./importer }
     security_opt: ["no-new-privileges:true"]
     cap_drop: ["ALL"]
-    user: "65534:0"
+    user: "65534:65534"
+    group_add: ["545"]
     depends_on: [db]
     env_file: [api.env]
-    environment:
-      AUDIO_DIR: /audio
-      AUDIO_PUBLIC_URL_BASE: ${AUDIO_PUBLIC_URL_BASE:?set AUDIO_PUBLIC_URL_BASE}
-    volumes:
-      - ${AUDIO_DIR}:/audio:ro
+    environment: *importer_env
+    read_only: true
+    tmpfs: ["/tmp"]
+    volumes: *importer_vols
     networks: [data]
 
   adminer:
