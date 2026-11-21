@@ -194,8 +194,12 @@ def run_import() -> dict:
                 conn.commit()
                 changed = res["changed"] or recut
                 report["changed"] |= changed
-                label = {"songs": f"{len(cut)} songs", "manual": "hand-edited tracks (left alone)",
-                         "whole": "1 full-length track"}[res["mode"]]
+                if res["mode"] == "songs":
+                    label = f"{len(cut or [])} songs"
+                elif res["mode"] == "manual":
+                    label = "hand-edited tracks (left alone)"
+                else:
+                    label = "1 full-length track"
                 report["shows"].append(
                     f"{parsed.display_date}  {(sc.title if sc and sc.title else parsed.title)}  [{label}]"
                     + ("  (updated)" if changed else "")
