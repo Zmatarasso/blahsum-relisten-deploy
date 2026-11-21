@@ -238,8 +238,9 @@ importer; it recreates the whole-file track.
 
 ### Option B (quick, no file changes): timestamp links
 Keep the whole-file track and share/list links like
-`…/blahsum/2025/04/26/the-gutter?t=3m0s`. You could put a song list with
-these links in `sources.description` (shown on the show page as text).
+`…/blahsum/2025/04/26/the-gutter?t=3m0s`. You can put a song list with start times in
+`sources.taper_notes` — the show page's tapes column displays taper notes
+as text (links may not be clickable).
 
 ### Missing (if Zach wants one-file markers)
 Implement `docs/track-splits.md`: player support for `?t=start,end` in
