@@ -9,3 +9,4 @@ relisten-web/
 db.env
 api.env
 backups/
+__pycache__/
