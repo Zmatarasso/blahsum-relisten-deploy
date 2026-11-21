@@ -41,7 +41,7 @@ services:
     <<: *hardening
     image: redis:7.4.12-alpine
     user: "999:1000"
-    command: ["redis-server", "--save", "", "--appendonly", "no", "--protected-mode", "yes"]
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--protected-mode", "no"]
     read_only: true
     tmpfs: ["/data"]
     networks: [data]
