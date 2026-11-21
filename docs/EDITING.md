@@ -77,6 +77,55 @@ Do **not** restart, update, or stop any non-relisten container (filebrowser,
 family-gifts, radio, homebridge, cactpot, tailscale, cloudflared) and don't
 change TrueNAS settings.
 
+## 3a. Where to put shows (adding new recordings)
+
+**Folder (one flat folder, all shows go here):**
+
+| From | Path |
+| --- | --- |
+| Windows / SMB | `\\truenas\Blahsum\shared\radioTracksStorage` |
+| NAS shell | `/mnt/BlahNas/Blahsum/shared/radioTracksStorage` |
+
+That is `AUDIO_DIR`; the site serves it read-only at `/audio/…`. Nothing
+else on the NAS is visible to the site. Subfolders work too (the path
+becomes part of the URL), but folders whose name starts with `_` or `.`
+are **ignored** by the importer (reserved for split song files, see §6).
+
+**File name = metadata.** One file = one show recording. Name live shows:
+
+```
+BLAHSUM live in <City>[ <ST>] <M-D-YY> <Venue or notes>.mp3
+e.g.  BLAHSUM live in Brooklyn NY 4-26-25 The Gutter.mp3
+```
+
+- Date: `M-D-YY`, `MM-DD-YY` or `M-D-YYYY`, dashes only (not slashes/dots).
+  2-digit years <70 → 20YY. The first valid date in the name wins.
+- Text after the date becomes the track title and venue (`The Gutter`).
+- Must contain the word `live` to count as a live show.
+- Studio songs: `BLAHSUM - <Title>.mp3` (no date → the file's modified date is used).
+- Formats: `.mp3` (best, what browsers stream), `.m4a`, `.ogg`, `.flac`, `.wav`
+  are picked up, but the player uses `mp3_url`, so prefer MP3.
+- Two files with the same date (e.g. `… 12-13-24 Frost St Gallery set 1.mp3`
+  and `… set 2.mp3`) become **one show with two alternate recordings
+  (sources)**, not two sets. To present them as Set 1 / Set 2 of one
+  recording, fix it in SQL (§5) or merge the audio before importing.
+- Avoid renaming a file after import: the importer keys on the path, so a
+  rename creates a second copy of the show (see README "gotcha").
+
+**Trigger the import** (on the NAS, safe to re-run any time):
+
+```sh
+cd /mnt/SolidStateApps/relisten/blahsum-relisten-deploy
+sudo -n docker compose --profile tools run --rm importer dry-run   # preview, no DB writes
+sudo -n docker compose --profile tools run --rm importer import    # do it
+```
+
+**Then:** the show appears at
+`https://truenas-scale.tail5a1866.ts.net:10000/blahsum/YYYY/MM/DD` (and on the
+artist/year pages) within ~5 minutes (web/API caches). To see it at once:
+`sudo -n docker compose restart redis api web`. Afterwards add song markers
+(§6) or fix titles/dates (§5).
+
 ## 4. Database model (upstream Relisten schema, unchanged)
 
 ```
@@ -135,60 +184,69 @@ alone.
 `BLAHSUM live in <City>[, <ST>] <M-D-YY> <Venue>.mp3`, then
 `sudo -n docker compose --profile tools run --rm importer import`.
 
-## 6. Marking individual songs inside a long show recording
+## 6. Track markers (songs inside a long show recording)
 
-Today every show is one long mp3 = one track. Two ways to split it:
+**What actually exists (checked Nov 21 2026: every branch/stash in the NAS,
+PC and GitHub copies of all three repos):**
 
-### A. Works today: physical split files + SQL (recommended now)
+| Feature | Status |
+| --- | --- |
+| **Timestamp links** `?t=` on a page URL, e.g. `/blahsum/2025/04/26/the-gutter?t=12m30s` (also `?t=750`, `1h2m3s`) | ✅ Works and deployed (inherited from upstream Relisten: `src/lib/timeParam.ts`, `PlayerManager.tsx`). Opens the show and jumps to that time. Good for "song X starts here" links, but it is not a song list. |
+| **Real per-song tracks** = several `source_tracks` rows per show | ✅ Works today with the stock player **if each song is its own audio file** (option A below). |
+| **Virtual splits** (`mp3_url=...mp3?t=180,720`, one file, many tracks) + `.cue` / `.splits.json` importer | ❌ Design only: `docs/track-splits.md` / PLAN.md Phase 6.5 ("about one day of work… pick up later"). No player or importer code exists on any branch. Rows with `?t=` URLs would just play the whole file. |
 
-1. Write a cue list (start times). Cut without re-encoding:
+### Option A (works today): cut song files + add track rows
+
+1. Write down song start times. Cut without re-encoding into a `_tracks`
+   subfolder (ignored by the importer). There's no ffmpeg on the NAS host, so
+   use the importer image (it has ffmpeg) with no network:
    ```sh
-   SRC="/mnt/BlahNas/Blahsum/shared/radioTracksStorage/BLAHSUM live in Brooklyn NY 4-26-25 The Gutter.mp3"
-   OUT="/mnt/BlahNas/Blahsum/shared/radioTracksStorage/_tracks/2025-04-26"
-   mkdir -p "$OUT"
-   # song 1: 0:00–3:00, song 2: 3:00–12:00, ... (last one: omit -to)
-   ffmpeg -n -i "$SRC" -ss 0   -to 180 -c copy "$OUT/01-intro.mp3"
-   ffmpeg -n -i "$SRC" -ss 180 -to 720 -c copy "$OUT/02-crystal-eel.mp3"
+   cd /mnt/SolidStateApps/relisten/blahsum-relisten-deploy
+   A=/mnt/BlahNas/Blahsum/shared/radioTracksStorage
+   mkdir -p "$A/_tracks/2025-04-26"
+   sudo -n docker run --rm --network none --user "$(id -u):0" -v "$A:/a" --entrypoint ffmpeg \
+     blahsum-relisten-deploy-importer -n -i "/a/BLAHSUM live in Brooklyn NY 4-26-25 The Gutter.mp3" \
+     -ss 0 -to 180 -c copy "/a/_tracks/2025-04-26/01-intro.mp3"
+   # repeat per song (-ss start -to end, seconds or HH:MM:SS; omit -to on the last)
    ```
-   (No ffmpeg on the NAS host: run it in a throwaway container with that one
-   folder mounted, e.g. the importer image which has ffmpeg:
-   `sudo -n docker run --rm --network none -v "$AUDIO_DIR:/a" --entrypoint ffmpeg blahsum-relisten-deploy-importer …`.
-   Writing into the audio share is a change to Zach's files — ask first.)
-   Files under any `_`-prefixed folder are **ignored by the importer**, so
-   they won't become fake shows.
-2. Replace the show's single track with per-song rows (same source & set):
+   This writes new files into Zach's audio share (originals untouched); ask first.
+2. Swap the show's single whole-file track for per-song rows (same source/set):
    ```sql
    BEGIN;
-   -- find the source
-   SELECT so.id AS source_id, ss.id AS set_id FROM sources so JOIN source_sets ss ON ss.source_id=so.id
-    WHERE so.display_date='2025-04-26';
-   DELETE FROM source_tracks WHERE source_id = :source_id;   -- the whole-file row
-   INSERT INTO source_tracks (artist_id, source_id, source_set_id, track_position, title, slug, mp3_url, duration, uuid, updated_at)
-   VALUES
-    ((SELECT id FROM artists WHERE slug='blahsum'), :source_id, :set_id, 1, 'Intro',       'intro',       'https://truenas-scale.tail5a1866.ts.net:10000/audio/_tracks/2025-04-26/01-intro.mp3',       180, gen_random_uuid(), now()),
-    ((SELECT id FROM artists WHERE slug='blahsum'), :source_id, :set_id, 2, 'Crystal Eel', 'crystal-eel', 'https://truenas-scale.tail5a1866.ts.net:10000/audio/_tracks/2025-04-26/02-crystal-eel.mp3', 540, gen_random_uuid(), now());
+   SELECT so.id AS source_id, ss.id AS set_id FROM sources so
+     JOIN source_sets ss ON ss.source_id = so.id WHERE so.display_date = '2025-04-26';
+   DELETE FROM source_tracks WHERE source_id = <source_id>;      -- the whole-file row
+   INSERT INTO source_tracks (artist_id, source_id, source_set_id, track_position, title, slug, mp3_url, duration, uuid, updated_at) VALUES
+    ((SELECT id FROM artists WHERE slug='blahsum'), <source_id>, <set_id>, 1, 'Intro', 'intro',
+     'https://truenas-scale.tail5a1866.ts.net:10000/audio/_tracks/2025-04-26/01-intro.mp3', 180, gen_random_uuid(), now()),
+    ((SELECT id FROM artists WHERE slug='blahsum'), <source_id>, <set_id>, 2, 'Crystal Eel', 'crystal-eel',
+     'https://truenas-scale.tail5a1866.ts.net:10000/audio/_tracks/2025-04-26/02-crystal-eel.mp3', 540, gen_random_uuid(), now());
    COMMIT;
    ```
-   URL-encode spaces etc. in `mp3_url` (`%20`). `duration` is seconds.
-   For an encore, add a `source_sets` row (`index`=1, `name`='Encore',
-   `is_encore`=true) and point those tracks' `source_set_id` at it.
-3. The importer sees the source has non-whole-file tracks and leaves them
-   alone on later runs (it still updates show/source metadata).
+   URL-encode spaces (`%20`) in `mp3_url`; `duration` = seconds; `slug` =
+   lowercase-with-dashes, unique within the show. Encore: add a
+   `source_sets` row (`index`=1, `name`='Encore', `is_encore`=true) and point
+   those tracks at it.
+3. Re-running the importer leaves hand-split shows alone (it skips track
+   rows for any source that has non-whole-file tracks).
 
-### B. Not built yet: virtual splits (`?t=start,end`)
+**Fix markers later:** re-cut the one song file with new times (overwrite
+with `-y` instead of `-n`), then update that row's `duration`; rename with
+`UPDATE source_tracks SET title=…, slug=… WHERE id=…`; reorder with
+`track_position`. To undo a split: delete the per-song rows and re-run the
+importer; it recreates the whole-file track.
 
-`docs/track-splits.md` designs splitting **without** cutting files:
-several `source_tracks` rows share one file with `mp3_url=...mp3?t=180,720`.
-The DB/API/edge already accept such URLs, but the **web player does not
-implement `?t=` yet** — it would play the whole file for every row. Missing
-work: player changes in `relisten-web/src/lib/player.tsx` (parse bounds, seek,
-stop at end, gapless within one file, scrubber math) and an importer/cue-sheet
-input (e.g. a `<file>.cue` or `.tracks.txt` sidecar → rows). Until then use A.
+### Option B (quick, no file changes): timestamp links
+Keep the whole-file track and share/list links like
+`…/blahsum/2025/04/26/the-gutter?t=3m0s`. You could put a song list with
+these links in `sources.description` (shown on the show page as text).
 
-### Missing today
-- No web admin UI for editing; edits are SQL/Adminer only.
-- No upload pipeline; new audio goes in via the SMB share + importer.
-- No cue-sheet importer.
+### Missing (if Zach wants one-file markers)
+Implement `docs/track-splits.md`: player support for `?t=start,end` in
+`relisten-web/src/lib/player.tsx` (seek, stop/advance at end, gapless within
+one file, scrubber/duration math) + importer reading `<file>.cue` /
+`<file>.splits.json` sidecars. Then markers become a text file next to the mp3.
+Also missing: admin UI, upload page.
 
 ## 7. Adminer (GUI), on demand only
 
