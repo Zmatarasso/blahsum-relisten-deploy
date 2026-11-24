@@ -170,7 +170,7 @@ services:
     # then from your PC: ssh -L 18080:127.0.0.1:18080 truenas_admin@truenas
     # and open http://localhost:18080  (stop it again when done)
     profiles: ["tools"]
-    image: adminer:5.5.1
+    image: adminer:6.3.1
     security_opt: ["no-new-privileges:true"]
     cap_drop: ["ALL"]
     depends_on: [db]
